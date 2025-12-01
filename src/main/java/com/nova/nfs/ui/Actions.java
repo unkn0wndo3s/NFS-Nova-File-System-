@@ -24,7 +24,7 @@ public class Actions {
         }
 
         FileChooser chooser = new FileChooser();
-        chooser.setTitle("Select files to import into NFS");
+        chooser.setTitle("Select files or folders to import into NFS");
         var files = chooser.showOpenMultipleDialog(stage);
         if (files == null || files.isEmpty()) {
             return;
@@ -32,9 +32,13 @@ public class Actions {
 
         for (File f : files) {
             try {
-                nfs.importExistingFile(currentFolder.getId(), f.toPath());
+                if (f.isDirectory()) {
+                    nfs.importDirectoryRecursive(currentFolder.getId(), f.toPath());
+                } else {
+                    nfs.importExistingFile(currentFolder.getId(), f.toPath());
+                }
             } catch (IOException e) {
-                System.err.println("Failed to import file: " + f + " - " + e.getMessage());
+                System.err.println("Failed to import: " + f + " - " + e.getMessage());
             }
         }
     }

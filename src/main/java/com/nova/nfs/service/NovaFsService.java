@@ -256,4 +256,30 @@ public class NovaFsService {
     public FileEntry saveFileEntry(FileEntry fileEntry) {
         return fileRepo.save(fileEntry);
     }
+        /**
+     * Importe un dossier Windows complet (récursif) :
+     * - crée un dossier logique dans NFS sous parentFolderId
+     * - importe tous les fichiers et sous-dossiers.
+     */
+    public Link importDirectoryRecursive(UUID parentFolderId, Path dir) throws IOException {
+        if (!Files.isDirectory(dir)) {
+            throw new IllegalArgumentException("Not a directory: " + dir);
+        }
+
+        String folderName = dir.getFileName().toString();
+        Link folderLink = createFolder(parentFolderId, folderName);
+
+        try (var stream = Files.list(dir)) {
+            for (Path child : stream.toList()) {
+                if (Files.isDirectory(child)) {
+                    importDirectoryRecursive(folderLink.getId(), child);
+                } else {
+                    importExistingFile(folderLink.getId(), child);
+                }
+            }
+        }
+
+        return folderLink;
+    }
+
 }

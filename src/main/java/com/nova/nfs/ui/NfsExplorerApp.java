@@ -8,6 +8,7 @@ import com.nova.nfs.repo.LinkRepository;
 import com.nova.nfs.service.NovaFsService;
 import com.nova.nfs.util.Bootstrap;
 import javafx.application.Application;
+import javafx.beans.binding.Bindings;
 import javafx.beans.property.SimpleStringProperty;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
@@ -18,6 +19,8 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
 
+import java.io.File;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.UUID;
@@ -30,7 +33,6 @@ public class NfsExplorerApp extends Application {
 
     @Override
     public void start(Stage primaryStage) {
-        // Racine NFS sur Windows
         Path baseDir = Path.of("C:/NFS");
         Path dataDir = baseDir.resolve("data");
         Path filesRoot = baseDir.resolve("files");
@@ -38,13 +40,11 @@ public class NfsExplorerApp extends Application {
         var fileRepo = new JsonFileRepository(dataDir.resolve("files.json"));
         LinkRepository linkRepo = new JsonLinkRepository(dataDir.resolve("links.json"));
 
-        // root + trash
         Link root = Bootstrap.ensureRoot(linkRepo);
         Link trash = Bootstrap.ensureTrash(linkRepo, root.getId());
 
         nfs = new NovaFsService(fileRepo, linkRepo, filesRoot, root.getId(), trash.getId());
 
-        // nettoyage cohérence
         nfs.cleanupDanglingFileLinks();
         nfs.attachOrphanFilesToRoot();
 
@@ -74,8 +74,7 @@ public class NfsExplorerApp extends Application {
         importBtn.setOnAction(e -> {
             Link folder = getCurrentFolderLink();
             Actions.importFromWindows(stage, nfs, folder);
-            refreshCurrentFolder();
-            refreshTree();
+            refreshCurrentFolder(); // on ne touche pas à l'arbre ici
         });
 
         Button newFolderBtn = new Button("New Folder");
@@ -88,8 +87,7 @@ public class NfsExplorerApp extends Application {
                 dialog.setContentText("Name:");
                 dialog.showAndWait().ifPresent(name -> {
                     nfs.createFolder(parent.getId(), name);
-                    refreshCurrentFolder();
-                    refreshTree();
+                    refreshTreePreserveSelection();
                 });
             }
         });
@@ -106,10 +104,10 @@ public class NfsExplorerApp extends Application {
         Button trashBtn = new Button("Move to Trash");
         trashBtn.setOnAction(e -> {
             Link selected = tableView.getSelectionModel().getSelectedItem();
-            if (selected != null) {
+            if (selected != null && selected.getType() == LinkType.FILE) {
                 Actions.moveToTrash(nfs, selected);
                 refreshCurrentFolder();
-                refreshTree();
+                // pas besoin de toucher à l'arbre
             }
         });
 
@@ -147,9 +145,7 @@ public class NfsExplorerApp extends Application {
 
             cell.setOnDragOver(event -> {
                 var db = event.getDragboard();
-                if (!event.isDropCompleted()
-                        && db.hasString()
-                        && cell.getItem() != null) {
+                if (db.hasString() && cell.getItem() != null) {
                     Link target = cell.getItem();
                     if (target.getType() == LinkType.FOLDER
                             || target.getType() == LinkType.ROOT
@@ -169,7 +165,7 @@ public class NfsExplorerApp extends Application {
                         Link target = cell.getItem();
                         nfs.moveLink(draggedId, target.getId());
                         success = true;
-                        refreshTree();
+                        refreshTreePreserveSelection();
                     } catch (Exception ex) {
                         System.err.println("Move failed: " + ex.getMessage());
                     }
@@ -208,7 +204,7 @@ public class NfsExplorerApp extends Application {
         tableView.getColumns().addAll(nameCol, typeCol);
         tableView.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
 
-        // Drag & drop depuis Windows vers le dossier courant
+        // DnD depuis Windows (fichiers + dossiers)
         tableView.setOnDragOver(event -> {
             var db = event.getDragboard();
             if (db.hasFiles()) {
@@ -221,35 +217,28 @@ public class NfsExplorerApp extends Application {
             var db = event.getDragboard();
             if (db.hasFiles()) {
                 Link folder = getCurrentFolderLink();
-                db.getFiles().forEach(f -> {
+                for (File f : db.getFiles()) {
                     try {
-                        nfs.importExistingFile(folder.getId(), f.toPath());
+                        if (f.isDirectory()) {
+                            nfs.importDirectoryRecursive(folder.getId(), f.toPath());
+                        } else {
+                            nfs.importExistingFile(folder.getId(), f.toPath());
+                        }
                     } catch (Exception e) {
                         System.err.println("Import failed: " + e);
                     }
-                });
+                }
                 refreshCurrentFolder();
-                refreshTree();
             }
             event.setDropCompleted(true);
             event.consume();
         });
 
-        // Lignes : double clic + DnD interne + menu contextuel
+        // Lignes : double clic, DnD interne et menu contextuel clic droit
         tableView.setRowFactory(tv -> {
-            TableRow<Link> row = new TableRow<>() {
-                @Override
-                protected void updateItem(Link item, boolean empty) {
-                    super.updateItem(item, empty);
-                    if (empty || item == null) {
-                        setContextMenu(null);
-                    } else {
-                        setContextMenu(buildRowContextMenu(item));
-                    }
-                }
-            };
+            TableRow<Link> row = new TableRow<>();
 
-            // double clic
+            // DOUBLE CLIC
             row.setOnMouseClicked(event -> {
                 if (event.getClickCount() == 2 && !row.isEmpty()) {
                     Link link = row.getItem();
@@ -261,7 +250,7 @@ public class NfsExplorerApp extends Application {
                 }
             });
 
-            // DnD source : déplacer link vers un dossier dans l'arbre
+            // DnD source : déplacer un link vers un dossier dans l'arbre
             row.setOnDragDetected(event -> {
                 if (!row.isEmpty()) {
                     Link link = row.getItem();
@@ -273,55 +262,69 @@ public class NfsExplorerApp extends Application {
                 }
             });
 
+            // CONTEXT MENU (clic droit)
+            ContextMenu menu = new ContextMenu();
+
+            MenuItem openItem = new MenuItem("Open");
+            openItem.setOnAction(e -> {
+                Link link = row.getItem();
+                if (link == null) return;
+                if (link.getType() == LinkType.FILE) {
+                    Actions.openFile(nfs, link);
+                } else if (link.getType() == LinkType.FOLDER || link.getType() == LinkType.TRASH) {
+                    selectFolderInTree(link.getId());
+                }
+            });
+
+            MenuItem renameItem = new MenuItem("Rename");
+            renameItem.setOnAction(e -> {
+                Link link = row.getItem();
+                if (link != null) renameLink(link);
+            });
+
+            MenuItem moveTrashItem = new MenuItem("Move to Trash");
+            moveTrashItem.setOnAction(e -> {
+                Link link = row.getItem();
+                if (link != null && link.getType() == LinkType.FILE) {
+                    Actions.moveToTrash(nfs, link);
+                    refreshCurrentFolder();
+                }
+            });
+
+            MenuItem exportItem = new MenuItem("Export");
+            exportItem.setOnAction(e -> {
+                Link link = row.getItem();
+                if (link != null) {
+                    Actions.exportSelectedToWindows(
+                            (Stage) tableView.getScene().getWindow(), nfs, link);
+                }
+            });
+
+            MenuItem deleteItem = new MenuItem("Delete permanently");
+            deleteItem.setOnAction(e -> {
+                Link link = row.getItem();
+                if (link != null && link.getType() == LinkType.FILE) {
+                    try {
+                        nfs.deleteFilePermanently(link.getId());
+                        refreshCurrentFolder();
+                    } catch (Exception ex) {
+                        System.err.println("Delete failed: " + ex.getMessage());
+                    }
+                }
+            });
+
+            menu.getItems().addAll(openItem, renameItem, moveTrashItem, exportItem, deleteItem);
+
+            // attacher/détacher le menu selon la ligne vide ou pas
+            row.contextMenuProperty().bind(
+                    Bindings.when(row.emptyProperty().not())
+                            .then(menu)
+                            .otherwise((ContextMenu) null)
+            );
+
+            VBox.setVgrow(tableView, Priority.ALWAYS);
             return row;
         });
-
-        VBox.setVgrow(tableView, Priority.ALWAYS);
-    }
-
-    private ContextMenu buildRowContextMenu(Link link) {
-        ContextMenu menu = new ContextMenu();
-
-        MenuItem open = new MenuItem("Open");
-        open.setOnAction(e -> {
-            if (link.getType() == LinkType.FILE) {
-                Actions.openFile(nfs, link);
-            } else if (link.getType() == LinkType.FOLDER || link.getType() == LinkType.TRASH) {
-                selectFolderInTree(link.getId());
-            }
-        });
-
-        MenuItem rename = new MenuItem("Rename");
-        rename.setOnAction(e -> renameLink(link));
-
-        MenuItem moveTrash = new MenuItem("Move to Trash");
-        moveTrash.setOnAction(e -> {
-            if (link.getType() == LinkType.FILE) {
-                Actions.moveToTrash(nfs, link);
-                refreshCurrentFolder();
-                refreshTree();
-            }
-        });
-
-        MenuItem export = new MenuItem("Export");
-        export.setOnAction(e -> Actions.exportSelectedToWindows(
-                (Stage) tableView.getScene().getWindow(), nfs, link));
-
-        MenuItem deletePermanent = new MenuItem("Delete permanently");
-        deletePermanent.setOnAction(e -> {
-            if (link.getType() == LinkType.FILE) {
-                try {
-                    nfs.deleteFilePermanently(link.getId());
-                    refreshCurrentFolder();
-                    refreshTree();
-                } catch (Exception ex) {
-                    System.err.println("Delete failed: " + ex.getMessage());
-                }
-            }
-        });
-
-        menu.getItems().addAll(open, rename, moveTrash, export, deletePermanent);
-        return menu;
     }
 
     private void renameSelected() {
@@ -337,16 +340,13 @@ public class NfsExplorerApp extends Application {
         dialog.setContentText("New name:");
         dialog.showAndWait().ifPresent(newName -> {
             link.setDisplayName(newName);
-
-            // Si fichier → MAJ FileEntry aussi
             nfs.getFileForFileLink(link).ifPresent(file -> {
                 file.setDisplayName(newName);
                 nfs.saveFileEntry(file);
             });
-
             nfs.saveLink(link);
             refreshCurrentFolder();
-            refreshTree();
+            // l'arbre ne change que si c'est un dossier → pas grave s'il reste un peu en retard
         });
     }
 
@@ -386,12 +386,24 @@ public class NfsExplorerApp extends Application {
         return null;
     }
 
-    private void refreshTree() {
+    /**
+     * Refresh de l'arbre en gardant le dossier courant sélectionné
+     * pour éviter les sauts et l'effet chiant de reset complet.
+     */
+    private void refreshTreePreserveSelection() {
+        UUID currentId = getCurrentFolderLink().getId();
+
         Link root = nfs.findLink(nfs.getRootLinkId()).orElseThrow();
         TreeItem<Link> rootItem = new TreeItem<>(root);
         rootItem.setExpanded(true);
         treeView.setRoot(rootItem);
         loadFolderChildrenRecursive(rootItem);
+
+        TreeItem<Link> sel = findItemById(rootItem, currentId);
+        if (sel != null) {
+            treeView.getSelectionModel().select(sel);
+        }
+
         refreshCurrentFolder();
     }
 
