@@ -19,15 +19,6 @@ public class NovaFsService {
     private final UUID rootLinkId;
     private final UUID trashLinkId;
 
-    public Link saveLink(Link link) {
-        return linkRepo.save(link);
-    }
-
-    public FileEntry saveFileEntry(FileEntry fileEntry) {
-        return fileRepo.save(fileEntry);
-    }
-
-
     public NovaFsService(FileRepository fileRepo,
                          LinkRepository linkRepo,
                          Path filesRootDir,
@@ -157,6 +148,29 @@ public class NovaFsService {
         linkRepo.save(link);
     }
 
+    /**
+     * Déplacer un link (FILE ou FOLDER) dans un autre dossier (ROOT/FOLDER/TRASH).
+     * On ne bouge jamais ROOT lui-même.
+     */
+    public void moveLink(UUID linkId, UUID newParentFolderId) {
+        Link link = linkRepo.findById(linkId)
+                .orElseThrow(() -> new IllegalArgumentException("link not found"));
+
+        if (link.getType() == LinkType.ROOT) {
+            throw new IllegalArgumentException("Cannot move ROOT");
+        }
+
+        // FILE -> on garde la logique existante
+        if (link.getType() == LinkType.FILE) {
+            moveFile(linkId, newParentFolderId);
+            return;
+        }
+
+        // FOLDER / TRASH (techniquement tu peux aussi déplacer TRASH si tu veux)
+        link.setParentId(newParentFolderId);
+        linkRepo.save(link);
+    }
+
     public void moveFileToTrash(UUID fileLinkId) {
         Link link = linkRepo.findById(fileLinkId)
                 .orElseThrow(() -> new IllegalArgumentException("fileLink not found"));
@@ -231,5 +245,15 @@ public class NovaFsService {
                 linkRepo.save(fileLink);
             }
         }
+    }
+
+    // ---------- helpers exposés pour l'UI ----------
+
+    public Link saveLink(Link link) {
+        return linkRepo.save(link);
+    }
+
+    public FileEntry saveFileEntry(FileEntry fileEntry) {
+        return fileRepo.save(fileEntry);
     }
 }

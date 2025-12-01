@@ -11,6 +11,8 @@ import javafx.application.Application;
 import javafx.beans.property.SimpleStringProperty;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
+import javafx.scene.input.ClipboardContent;
+import javafx.scene.input.TransferMode;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
@@ -93,28 +95,7 @@ public class NfsExplorerApp extends Application {
         });
 
         Button renameBtn = new Button("Rename");
-        renameBtn.setOnAction(e -> {
-            Link selected = tableView.getSelectionModel().getSelectedItem();
-            if (selected == null) return;
-
-            TextInputDialog dialog = new TextInputDialog(selected.getDisplayName());
-            dialog.setTitle("Rename");
-            dialog.setHeaderText("Rename item");
-            dialog.setContentText("New name:");
-            dialog.showAndWait().ifPresent(newName -> {
-                selected.setDisplayName(newName);
-
-                // Si fichier → MAJ FileEntry aussi
-                nfs.getFileForFileLink(selected).ifPresent(file -> {
-                    file.setDisplayName(newName);
-                    nfs.saveFileEntry(file);
-                });
-
-                nfs.saveLink(selected);
-                refreshCurrentFolder();
-                refreshTree();
-            });
-        });
+        renameBtn.setOnAction(e -> renameSelected());
 
         Button exportBtn = new Button("Export");
         exportBtn.setOnAction(e -> {
@@ -125,9 +106,11 @@ public class NfsExplorerApp extends Application {
         Button trashBtn = new Button("Move to Trash");
         trashBtn.setOnAction(e -> {
             Link selected = tableView.getSelectionModel().getSelectedItem();
-            Actions.moveToTrash(nfs, selected);
-            refreshCurrentFolder();
-            refreshTree();
+            if (selected != null) {
+                Actions.moveToTrash(nfs, selected);
+                refreshCurrentFolder();
+                refreshTree();
+            }
         });
 
         Button openBtn = new Button("Open");
@@ -150,6 +133,52 @@ public class NfsExplorerApp extends Application {
             if (newV != null) {
                 onFolderSelected(newV.getValue());
             }
+        });
+
+        // DnD cible : déplacer fichier/dossier vers un dossier de l'arbre
+        treeView.setCellFactory(tv -> {
+            TreeCell<Link> cell = new TreeCell<>() {
+                @Override
+                protected void updateItem(Link item, boolean empty) {
+                    super.updateItem(item, empty);
+                    setText(empty || item == null ? "" : item.getDisplayName());
+                }
+            };
+
+            cell.setOnDragOver(event -> {
+                var db = event.getDragboard();
+                if (!event.isDropCompleted()
+                        && db.hasString()
+                        && cell.getItem() != null) {
+                    Link target = cell.getItem();
+                    if (target.getType() == LinkType.FOLDER
+                            || target.getType() == LinkType.ROOT
+                            || target.getType() == LinkType.TRASH) {
+                        event.acceptTransferModes(TransferMode.MOVE);
+                    }
+                }
+                event.consume();
+            });
+
+            cell.setOnDragDropped(event -> {
+                var db = event.getDragboard();
+                boolean success = false;
+                if (db.hasString() && cell.getItem() != null) {
+                    try {
+                        UUID draggedId = UUID.fromString(db.getString());
+                        Link target = cell.getItem();
+                        nfs.moveLink(draggedId, target.getId());
+                        success = true;
+                        refreshTree();
+                    } catch (Exception ex) {
+                        System.err.println("Move failed: " + ex.getMessage());
+                    }
+                }
+                event.setDropCompleted(success);
+                event.consume();
+            });
+
+            return cell;
         });
     }
 
@@ -181,8 +210,9 @@ public class NfsExplorerApp extends Application {
 
         // Drag & drop depuis Windows vers le dossier courant
         tableView.setOnDragOver(event -> {
-            if (event.getDragboard().hasFiles()) {
-                event.acceptTransferModes(javafx.scene.input.TransferMode.COPY);
+            var db = event.getDragboard();
+            if (db.hasFiles()) {
+                event.acceptTransferModes(TransferMode.COPY);
             }
             event.consume();
         });
@@ -191,13 +221,13 @@ public class NfsExplorerApp extends Application {
             var db = event.getDragboard();
             if (db.hasFiles()) {
                 Link folder = getCurrentFolderLink();
-                for (var f : db.getFiles()) {
+                db.getFiles().forEach(f -> {
                     try {
                         nfs.importExistingFile(folder.getId(), f.toPath());
                     } catch (Exception e) {
                         System.err.println("Import failed: " + e);
                     }
-                }
+                });
                 refreshCurrentFolder();
                 refreshTree();
             }
@@ -205,8 +235,21 @@ public class NfsExplorerApp extends Application {
             event.consume();
         });
 
+        // Lignes : double clic + DnD interne + menu contextuel
         tableView.setRowFactory(tv -> {
-            TableRow<Link> row = new TableRow<>();
+            TableRow<Link> row = new TableRow<>() {
+                @Override
+                protected void updateItem(Link item, boolean empty) {
+                    super.updateItem(item, empty);
+                    if (empty || item == null) {
+                        setContextMenu(null);
+                    } else {
+                        setContextMenu(buildRowContextMenu(item));
+                    }
+                }
+            };
+
+            // double clic
             row.setOnMouseClicked(event -> {
                 if (event.getClickCount() == 2 && !row.isEmpty()) {
                     Link link = row.getItem();
@@ -217,10 +260,94 @@ public class NfsExplorerApp extends Application {
                     }
                 }
             });
+
+            // DnD source : déplacer link vers un dossier dans l'arbre
+            row.setOnDragDetected(event -> {
+                if (!row.isEmpty()) {
+                    Link link = row.getItem();
+                    var db = row.startDragAndDrop(TransferMode.MOVE);
+                    ClipboardContent content = new ClipboardContent();
+                    content.putString(link.getId().toString());
+                    db.setContent(content);
+                    event.consume();
+                }
+            });
+
             return row;
         });
 
         VBox.setVgrow(tableView, Priority.ALWAYS);
+    }
+
+    private ContextMenu buildRowContextMenu(Link link) {
+        ContextMenu menu = new ContextMenu();
+
+        MenuItem open = new MenuItem("Open");
+        open.setOnAction(e -> {
+            if (link.getType() == LinkType.FILE) {
+                Actions.openFile(nfs, link);
+            } else if (link.getType() == LinkType.FOLDER || link.getType() == LinkType.TRASH) {
+                selectFolderInTree(link.getId());
+            }
+        });
+
+        MenuItem rename = new MenuItem("Rename");
+        rename.setOnAction(e -> renameLink(link));
+
+        MenuItem moveTrash = new MenuItem("Move to Trash");
+        moveTrash.setOnAction(e -> {
+            if (link.getType() == LinkType.FILE) {
+                Actions.moveToTrash(nfs, link);
+                refreshCurrentFolder();
+                refreshTree();
+            }
+        });
+
+        MenuItem export = new MenuItem("Export");
+        export.setOnAction(e -> Actions.exportSelectedToWindows(
+                (Stage) tableView.getScene().getWindow(), nfs, link));
+
+        MenuItem deletePermanent = new MenuItem("Delete permanently");
+        deletePermanent.setOnAction(e -> {
+            if (link.getType() == LinkType.FILE) {
+                try {
+                    nfs.deleteFilePermanently(link.getId());
+                    refreshCurrentFolder();
+                    refreshTree();
+                } catch (Exception ex) {
+                    System.err.println("Delete failed: " + ex.getMessage());
+                }
+            }
+        });
+
+        menu.getItems().addAll(open, rename, moveTrash, export, deletePermanent);
+        return menu;
+    }
+
+    private void renameSelected() {
+        Link selected = tableView.getSelectionModel().getSelectedItem();
+        if (selected == null) return;
+        renameLink(selected);
+    }
+
+    private void renameLink(Link link) {
+        TextInputDialog dialog = new TextInputDialog(link.getDisplayName());
+        dialog.setTitle("Rename");
+        dialog.setHeaderText("Rename item");
+        dialog.setContentText("New name:");
+        dialog.showAndWait().ifPresent(newName -> {
+            link.setDisplayName(newName);
+
+            // Si fichier → MAJ FileEntry aussi
+            nfs.getFileForFileLink(link).ifPresent(file -> {
+                file.setDisplayName(newName);
+                nfs.saveFileEntry(file);
+            });
+
+            nfs.saveLink(link);
+            refreshCurrentFolder();
+            refreshTree();
+        });
     }
 
     private void onFolderSelected(Link folderLink) {
@@ -265,7 +392,6 @@ public class NfsExplorerApp extends Application {
         rootItem.setExpanded(true);
         treeView.setRoot(rootItem);
         loadFolderChildrenRecursive(rootItem);
-        // On re-sélectionne le dossier courant pour resync table (optionnel)
         refreshCurrentFolder();
     }
 
