@@ -5,7 +5,6 @@ import com.nova.nfs.core.Link;
 import com.nova.nfs.core.LinkType;
 import com.nova.nfs.service.NovaFsService;
 import javafx.stage.DirectoryChooser;
-import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 
 import java.awt.*;
@@ -23,23 +22,17 @@ public class Actions {
             return;
         }
 
-        FileChooser chooser = new FileChooser();
-        chooser.setTitle("Select files or folders to import into NFS");
-        var files = chooser.showOpenMultipleDialog(stage);
-        if (files == null || files.isEmpty()) {
+        DirectoryChooser chooser = new DirectoryChooser();
+        chooser.setTitle("Select a folder to import into NFS");
+        File selectedDir = chooser.showDialog(stage);
+        if (selectedDir == null) {
             return;
         }
 
-        for (File f : files) {
-            try {
-                if (f.isDirectory()) {
-                    nfs.importDirectoryRecursive(currentFolder.getId(), f.toPath());
-                } else {
-                    nfs.importExistingFile(currentFolder.getId(), f.toPath());
-                }
-            } catch (IOException e) {
-                System.err.println("Failed to import: " + f + " - " + e.getMessage());
-            }
+        try {
+            nfs.importDirectoryRecursive(currentFolder.getId(), selectedDir.toPath());
+        } catch (IOException e) {
+            System.err.println("Failed to import directory: " + selectedDir + " - " + e.getMessage());
         }
     }
 

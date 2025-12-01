@@ -74,7 +74,8 @@ public class NfsExplorerApp extends Application {
         importBtn.setOnAction(e -> {
             Link folder = getCurrentFolderLink();
             Actions.importFromWindows(stage, nfs, folder);
-            refreshCurrentFolder(); // on ne touche pas à l'arbre ici
+            refreshTreePreserveSelection(); // rafraîchir l'arbre pour voir les nouveaux dossiers
+            refreshCurrentFolder(); // rafraîchir la table pour voir les nouveaux fichiers
         });
 
         Button newFolderBtn = new Button("New Folder");
